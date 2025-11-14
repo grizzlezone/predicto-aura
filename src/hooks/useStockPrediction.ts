@@ -9,6 +9,8 @@ interface PredictionData {
   reasoning: string;
   targetPrice30d: number;
   targetPrice90d: number;
+  currentPrice: number; 
+  chartData: Array<{ date: string; close: number }>;
 }
 
 interface SentimentData {

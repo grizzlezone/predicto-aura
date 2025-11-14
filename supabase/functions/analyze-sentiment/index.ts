@@ -1,4 +1,8 @@
+
+
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
+
+// @ts-ignore: Local TS compiler cannot resolve this remote module
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 const corsHeaders = {
@@ -6,13 +10,15 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-serve(async (req) => {
+// @ts-ignore: Explicitly typed 'req' as Request, but Deno type is not local
+serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    const { ticker } = await req.json();
+    // We only need the ticker from the frontend
+    const { ticker } = await req.json(); 
     
     if (!ticker) {
       return new Response(
@@ -21,101 +27,135 @@ serve(async (req) => {
       );
     }
 
-    const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
-    if (!LOVABLE_API_KEY) {
-      console.error('LOVABLE_API_KEY is not configured');
+    // --- 1. FETCH REAL HISTORICAL DATA (ALPHA VANTAGE) ---
+    // @ts-ignore: Deno is available in the Edge Function runtime
+    const STOCK_API_KEY = Deno.env.get('STOCK_API_KEY');
+    if (!STOCK_API_KEY) {
+      console.error('STOCK_API_KEY is not configured');
+      return new Response(
+        JSON.stringify({ error: 'Stock Data API key is not configured' }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Use Alpha Vantage endpoint to get daily historical data
+    const stockDataUrl = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${ticker}&outputsize=compact&apikey=E65IRBNJAF23EORH`;
+    
+    const stockResponse = await fetch(stockDataUrl);
+    const stockRawData = await stockResponse.json();
+
+    if (stockRawData["Error Message"] || stockRawData["Note"]) {
+        console.error('Alpha Vantage Error:', stockRawData["Error Message"] || stockRawData["Note"]);
+        return new Response(
+            JSON.stringify({ error: 'Failed to fetch stock data: ' + (stockRawData["Error Message"] || "API limit reached") }),
+            { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+    }
+
+    // Transform data for AI prompt (get last 30 days of closing prices)
+    const timeSeries = stockRawData["Time Series (Daily)"];
+    const historicalDataForAI = Object.keys(timeSeries)
+        .slice(0, 30)
+        .map(date => ({ 
+            date, 
+            close: parseFloat(timeSeries[date]["4. close"]) 
+        }));
+
+    // --- 2. DIRECT GEMINI API CALL ---
+    // @ts-ignore: Deno is available in the Edge Function runtime
+    const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
+    if (!GEMINI_API_KEY) {
+      console.error('GEMINI_API_KEY is not configured');
       return new Response(
         JSON.stringify({ error: 'AI service not configured' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
-
-    const prompt = `Analyze market sentiment for ${ticker} stock based on current market conditions and news.
+    
+    // Create analysis prompt using the newly fetched data
+    const prompt = `Analyze the stock ${ticker} using the following historical closing prices (Date: Close Price): ${JSON.stringify(historicalDataForAI)}. Provide a price prediction for the next 7 days.
 
 Provide a JSON response with:
-1. sentiment: "bullish", "bearish", or "neutral"
-2. score: sentiment score from -100 (very bearish) to +100 (very bullish)
-3. summary: brief summary of market sentiment
-4. factors: array of 3-5 key factors influencing sentiment
-5. newsHeadlines: array of 3 simulated relevant news headlines
+1. predictedPrice: estimated price for next trading day
+2. confidence: confidence level (0-100)
+3. trend: "bullish", "bearish", or "neutral"
+4. reasoning: brief explanation of the prediction
+5. targetPrice30d: 30-day target price
+6. targetPrice90d: 90-day target price
+7. currentPrice: The most recent closing price from the historical data provided.
 
 Respond ONLY with valid JSON, no markdown or additional text.`;
 
-    console.log('Analyzing sentiment for ticker:', ticker);
+    console.log('Sending request to Gemini AI for ticker:', ticker);
 
-    const response = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+    // Using the official Gemini endpoint and passing the key as a query parameter
+    const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models/google/gemini-2.5-flash:generateContent';
+    
+    const response = await fetch(`${GEMINI_ENDPOINT}?key=${GEMINI_API_KEY}`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${LOVABLE_API_KEY}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'google/gemini-2.5-flash',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a market sentiment analyst AI. Always respond with valid JSON only.'
-          },
+        // Model is part of the body payload
+        model: 'google/gemini-2.5-flash', 
+        contents: [
           {
             role: 'user',
-            content: prompt
+            parts: [{ text: prompt }]
           }
         ],
-        temperature: 0.7,
+        config: {
+          temperature: 0.7,
+        }
       }),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('Lovable AI error:', response.status, errorText);
+      console.error('Gemini API error:', response.status, errorText);
       
-      if (response.status === 429) {
-        return new Response(
-          JSON.stringify({ error: 'Rate limit exceeded. Please try again later.' }),
-          { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
-      }
-      
-      if (response.status === 402) {
-        return new Response(
-          JSON.stringify({ error: 'AI credits exhausted. Please add credits to your workspace.' }),
-          { status: 402, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        );
-      }
-
+      // Generic error response for direct API call failures
       return new Response(
-        JSON.stringify({ error: 'AI service error' }),
-        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        JSON.stringify({ error: `Gemini API call failed (${response.status}): ${response.statusText}` }),
+        { status: response.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
     const data = await response.json();
-    console.log('Sentiment analysis received');
+    console.log('Gemini AI response received');
 
-    const aiResponse = data.choices[0].message.content;
+    // Corrected parsing for the Gemini 'generateContent' response structure
+    const aiResponse = data.candidates[0].content.parts[0].text;
     
-    let sentimentData;
+    let prediction;
     try {
       const jsonStr = aiResponse.replace(/```json\n?|\n?```/g, '').trim();
-      sentimentData = JSON.parse(jsonStr);
+      prediction = JSON.parse(jsonStr);
+      
+      // *** IMPORTANT: Attach the historical data to the prediction response ***
+      prediction.chartData = historicalDataForAI;
     } catch (parseError) {
       console.error('Failed to parse AI response:', aiResponse);
-      sentimentData = {
-        sentiment: 'neutral',
-        score: 0,
-        summary: 'Unable to analyze sentiment',
-        factors: [],
-        newsHeadlines: []
+      // Fallback response
+      prediction = {
+        predictedPrice: 0,
+        confidence: 50,
+        trend: 'neutral',
+        reasoning: 'Unable to generate prediction due to parsing error.',
+        targetPrice30d: 0,
+        targetPrice90d: 0,
+        chartData: historicalDataForAI // Still send the real historical data
       };
     }
 
     return new Response(
-      JSON.stringify(sentimentData),
+      JSON.stringify(prediction),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
 
   } catch (error) {
-    console.error('Error in analyze-sentiment function:', error);
+    console.error('Error in predict-stock function:', error);
     return new Response(
       JSON.stringify({ error: error instanceof Error ? error.message : 'Unknown error' }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }

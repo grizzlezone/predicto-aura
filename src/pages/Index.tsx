@@ -11,74 +11,59 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 const Index = () => {
   const [ticker, setTicker] = useState("AAPL");
-  const [currentData, setCurrentData] = useState(generateMockData("AAPL"));
+  const [currentData, setCurrentData] = useState<any>({ 
+      currentPrice: 0, 
+      predictedPrice: 0, 
+      change: 0, 
+      volume: 0, 
+      sentimentScore: 0, 
+      confidence: 0,
+      chartData: [],
+  });
   const [aiPrediction, setAiPrediction] = useState<any>(null);
   const [aiSentiment, setAiSentiment] = useState<any>(null);
   const { toast } = useToast();
   const { loading, getPrediction, getSentiment } = useStockPrediction();
 
-  function generateMockData(symbol: string) {
-    const basePrice = Math.random() * 200 + 100;
-    const data = [];
-    
-    // Historical data (30 days)
-    for (let i = 30; i >= 0; i--) {
-      const date = new Date();
-      date.setDate(date.getDate() - i);
-      const variance = (Math.random() - 0.5) * 20;
-      data.push({
-        date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-        actual: basePrice + variance + (i * 0.5),
-      });
-    }
-    
-    // Predicted data (7 days)
-    for (let i = 1; i <= 7; i++) {
-      const date = new Date();
-      date.setDate(date.getDate() + i);
-      const trend = Math.random() > 0.5 ? 1 : -1;
-      const variance = Math.random() * 10;
-      data.push({
-        date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-        actual: undefined,
-        predicted: basePrice + (i * 2 * trend) + variance,
-      });
-    }
 
-    const currentPrice = data[30].actual!;
-    const predictedPrice = data[data.length - 1].predicted!;
-    const change = ((predictedPrice - currentPrice) / currentPrice) * 100;
-    const sentiment: "bullish" | "bearish" | "neutral" = change > 2 ? "bullish" : change < -2 ? "bearish" : "neutral";
 
-    return {
-      symbol,
-      currentPrice: currentPrice.toFixed(2),
-      predictedPrice: predictedPrice.toFixed(2),
-      change: change.toFixed(2),
-      volume: (Math.random() * 100000000).toFixed(0),
-      sentiment,
-      sentimentScore: 50 + change * 5,
-      confidence: 75 + Math.random() * 20,
-      chartData: data,
-    };
-  }
-
-  const handleSearch = async (searchTicker: string) => {
+ const handleSearch = async (searchTicker: string) => {
     toast({
       title: "Analyzing Stock",
       description: `Running AI analysis on ${searchTicker}...`,
     });
     
-    // Generate mock data for chart
-    const newData = generateMockData(searchTicker);
-    setCurrentData(newData);
+    // 1. Get AI predictions. The backend (Deno function) now handles Alpha Vantage fetching.
+    // We assume the hook function signature is updated to only take the ticker.
+    const prediction = await getPrediction(searchTicker); 
     
-    // Get AI predictions
-    const prediction = await getPrediction(searchTicker, newData.chartData);
-    setAiPrediction(prediction);
-    
-    // Get AI sentiment
+    // 2. Get AI sentiment
     const sentiment = await getSentiment(searchTicker);
+    
+    if (prediction) {
+        // Map the combined data structure from the backend to the component's state shape
+        setCurrentData({
+            symbol: searchTicker,
+            // Use real data from the prediction object
+            currentPrice: prediction.currentPrice?.toFixed(2) || 'N/A', 
+            predictedPrice: prediction.predictedPrice?.toFixed(2) || 'N/A',
+            // Volume is still placeholder as it wasn't fetched/calculated in Deno code
+            volume: (Math.random() * 100000000).toFixed(0), 
+            // Use sentiment data or fallback to prediction trend
+            sentiment: sentiment?.sentiment || prediction.trend,
+            sentimentScore: sentiment?.score || 50,
+            confidence: prediction.confidence,
+            
+            // Map the backend's 'close' price from Alpha Vantage to the chart's expected 'actual'
+            chartData: prediction.chartData.map((d: any) => ({
+                date: d.date,
+                actual: d.close, // <-- Mapped from 'close' to 'actual' for the PriceChart
+                predicted: undefined // AI prediction is visualized separately on the chart
+            })),
+        });
+        setAiPrediction(prediction);
+    }
+    
     setAiSentiment(sentiment);
     
     if (prediction && sentiment) {
@@ -91,6 +76,7 @@ const Index = () => {
 
   // Load initial AI data
   useEffect(() => {
+	console.log(ticker)
     handleSearch(ticker);
   }, []);
 
@@ -123,7 +109,7 @@ const Index = () => {
             <>
               <MetricCard
                 title="Current Price"
-                value={`$${currentData.currentPrice}`}
+                value={`$${currentData.currentPrice || '0.00'}`}
                 icon={DollarSign}
                 trend="neutral"
               />
@@ -141,11 +127,13 @@ const Index = () => {
                 trend="neutral"
               />
               <MetricCard
-                title="AI Confidence"
-                value={aiPrediction ? `${aiPrediction.confidence}%` : `${currentData.confidence.toFixed(0)}%`}
-                icon={Activity}
-                trend="up"
-              />
+				title="AI Confidence"
+				value={aiPrediction ? 
+						`${aiPrediction.confidence}%` : 
+						`${(currentData.confidence || 0).toFixed(0)}%`} // <-- Protected toFixed call
+				icon={Activity}
+				trend="up"
+				/>
             </>
           )}
         </div>
